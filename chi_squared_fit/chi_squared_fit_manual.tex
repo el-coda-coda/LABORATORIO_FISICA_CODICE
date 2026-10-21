@@ -1,0 +1,375 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{amsmath,amssymb,amsfonts,mathtools}
+\usepackage{geometry}
+\geometry{top=2.5cm, bottom=2.5cm, left=2.3cm, right=2.3cm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{bm}
+
+% Configurazione per il codice Python
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.97,0.97,0.97}
+
+\lstdefinestyle{pythonstyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{blue}\bfseries,
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=4,
+    frame=single
+}
+\lstset{style=pythonstyle}
+
+\title{\textbf{Fondamenti Teorici e Metodi Computazionali per la Regressione Ortogonale Rigorosa ed Error Analysis}\\\large Trattato di Analisi Statistica Sperimentale e Architettura del Codice \texttt{FitPipeline}}
+\author{Laboratorio di Fisica Sperimentale e Computazionale}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Questo trattato fornisce una disamina teorica e computazionale completa della stima dei parametri in presenza di errori su entrambe le coordinate (modelli \emph{Errors-in-Variables}). Nella prima parte si sintetizza l'architettura a tre stadi implementata in \texttt{FitPipeline}. Nella seconda parte viene sviluppata approfonditamente la teoria statistica: dal principio di massima verosimiglianza per variabili vettoriali alla formulazione della regressione ortogonale (ODR), dall'origine geometrica delle degenerazioni periodiche alle dimostrazioni asintotiche del bias da varianza mobile. Si analizza infine la convergenza asintotica della distribuzione chi-quadro, la geometria delle superfici di livello con HESSE e MINOS e la teoria quantitativa dei residui normalizzati (\emph{pulls}).
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Architettura e Metodi del Codice \texttt{chi\_squared\_fit.py}}
+% ──────────────────────────────────────────────────────────────────────────────
+
+L'obiettivo dell'infrastruttura software è automatizzare l'analisi di dati sperimentali bidimensionali garantendo tre proprietà fondamentali:
+\begin{enumerate}
+    \item \textbf{Consistenza statistica}: assenza di bias da denominatori mobili nei minimi quadrati generalizzati;
+    \item \textbf{Invarianza globale}: capacità di evitare trappole di minimi locali spuri o sub-armoniche anche in presenza di parametri di primo tentativo ($p_0$) errati;
+    \item \textbf{Stima corretta delle incertezze}: estrazione di matrici di covarianza ben condizionate e calcolo di intervalli di confidenza asimmetrici tramite \texttt{iminuit}.
+\end{enumerate}
+
+\subsection{Componenti Strutturali}
+
+\subsubsection{Contenitori dei Risultati: \texttt{ParametroFit} e \texttt{RisultatiFit}}
+L'incapsulamento dell'output separa rigorosamente le stime paraboliche simmetriche da quelle ottenute esplorando il profilo di verosimiglianza reale:
+\begin{itemize}
+    \item \texttt{ParametroFit}: aggrega la stima centrale $\hat{\theta}_j$, l'incertezza simmetrica locale da matrice di curvatura $\sigma_{j, \text{hesse}} = \sqrt{2 (\mathbf{H}^{-1})_{jj}}$, le deviazioni asimmetriche $\Delta_{\text{up}}, \Delta_{\text{down}}$ determinate dal solutore MINOS, e l'indice di asimmetria percentuale:
+    \begin{equation}
+        \alpha_j = \frac{\Delta_{\text{up}} - \Delta_{\text{down}}}{\frac{1}{2}(\Delta_{\text{up}} + \Delta_{\text{down}})} \times 100
+    \end{equation}
+    \item \texttt{RisultatiFit}: aggrega i parametri stimati, il valore ottimo $\chi^2_{\text{min}}$, i gradi di libertà $\nu = N - p$, il chi-quadro ridotto $\chi^2_{\text{rid}} = \chi^2 / \nu$, il valore $p = \int_{\chi^2_{\text{min}}}^\infty f_{\chi^2}(z; \nu)\,dz$, il vettore dei residui $r_i$ e la matrice di covarianza $p \times p$.
+\end{itemize}
+
+\subsection{Strategie per la Funzione Obiettivo di Minuit}
+
+Minuit opera configurato con \texttt{errordef = Minuit.LEAST\_SQUARES} ($\Delta \chi^2 = 1.0$ per la copertura a $1\sigma$). Nel codice sono fornite due implementazioni alternative della funzione di costo:
+
+\begin{enumerate}
+    \item \textbf{\texttt{\_CostoODR\_linearizzato}} (Varianza Effettiva Mobile):
+    \begin{equation}
+        \chi^2_{\text{eff}}(\boldsymbol{\theta}) = \sum_{i=1}^N \frac{\left(y_i - f(x_i; \boldsymbol{\theta})\right)^2}{\sigma_{y, i}^2 + \left(\left.\frac{\partial f}{\partial x}\right|_{x_i; \boldsymbol{\theta}} \sigma_{x, i}\right)^2}
+    \end{equation}
+    Le derivate numeriche $\frac{\partial f}{\partial x}$ vengono ricalcolate a ogni step dell'ottimizzatore. Come dimostrato nella Sezione~\ref{sec:bias_proof}, questa dipendenza di $\sigma_{\text{eff}}$ da $\boldsymbol{\theta}$ sposta sistematicamente il minimo verso pendenze maggiori.
+    
+    \item \textbf{\texttt{\_CostoODR}} (Metodo A a Varianza Congelata - Standard di Laboratorio):
+    \begin{equation}
+        \sigma_{\text{tot}, i}^2 = \sigma_{y, i}^2 + \left(\left.\frac{\partial f}{\partial x}\right|_{x_i; \mathbf{p}_{\text{ref}}} \sigma_{x, i}\right)^2 = \text{costante} \quad \forall i
+    \end{equation}
+    I pesi vengono pre-calcolati una sola volta sul vettore $\mathbf{p}_{\text{ref}}$ restituito dalla stima preliminare con ODRPACK nativo. Il funzionale:
+    \begin{equation}
+        \chi^2(\boldsymbol{\theta}) = \sum_{i=1}^N \frac{\left(y_i - f(x_i; \boldsymbol{\theta})\right)^2}{\sigma_{\text{tot}, i}^2}
+    \end{equation}
+    possiede denominatori statici: il gradiente è analiticamente non distorto e l'Hessiana è rigorosamente simmetrica e definita positiva vicino al minimo.
+\end{enumerate}
+
+\subsection{Pipeline a Tre Stadi e Ricerca Globale (\texttt{FitPipeline})}
+
+La classe \texttt{FitPipeline} esegue un flusso a tre barriere numeriche:
+\begin{enumerate}
+    \item \textbf{Pre-fit Locale}: esegue \texttt{scipy.odr.ODR} con i valori di $p_0$ forniti dall'utente.
+    \item \textbf{Controllo di Qualità e Fallback Stocastico}: valuta il chi-quadro ridotto grezzo del pre-fit. Se $\chi^2_{\text{rid}} > 8.0$, l'algoritmo rileva un arresto su un falso minimo o sub-armonica e scatena \texttt{\_ricerca\_globale\_fallback}. Questo metodo applica l'algoritmo di \emph{Dual Annealing} su uno spazio delimitato da bordi fisici adattivi, combinando l'esplorazione Monte Carlo a raffreddamento simulato con una discesa locale di tipo Nelder-Mead/BFGS.
+    \item \textbf{Inizializzazione e Analisi Minuit}: i parametri non distorti ottenuti dall'ODR finale vengono usati come ancoraggio statico per \texttt{\_CostoODR}. Minuit esegue \texttt{migrad()}, calcola la curvatura esatta con \texttt{hesse()} ed estrae gli errori asimmetrici con \texttt{minos()}.
+\end{enumerate}
+
+\newpage
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Teoria Statistica Avanzata dei Minimi Quadrati e dell'ODR}
+% ──────────────────────────────────────────────────────────────────────────────
+
+\subsection{Derivazione del Principio dei Minimi Quadrati dalla Verosimiglianza}
+
+Consideriamo un processo di misura in cui sia la variabile indipendente sia la variabile dipendente sono grandezze fisiche stocastiche. Sia $(x_i^*, y_i^*)$ lo stato vero della natura per l'$i$-esima osservazione, vincolato a giacere esattamente sulla varietà unidimensionale definita dal modello teorico:
+\begin{equation}
+    y_i^* = f(x_i^*; \boldsymbol{\theta}^*)
+\end{equation}
+dove $\boldsymbol{\theta}^* \in \mathbb{R}^p$ è il vettore dei parametri fisici veri. L'apparato sperimentale genera una coppia osservata $(x_i, y_i)$ affetta da errori casuali additivi:
+\begin{equation}
+    x_i = x_i^* + \delta_i, \qquad y_i = y_i^* + \epsilon_i
+\end{equation}
+Sotto l'ipotesi che gli errori sperimentali siano governati da processi stocastici gaussiani a media nulla, non correlati tra punti distinti e non correlati tra $x$ e $y$ sullo stesso punto, il vettore degli scarti $\bm{\eta}_i = (\delta_i, \epsilon_i)^T$ possiede matrice di covarianza diagonale:
+\begin{equation}
+    \mathbf{V}_i = \begin{pmatrix} \sigma_{x, i}^2 & 0 \\ 0 & \sigma_{y, i}^2 \end{pmatrix}
+\end{equation}
+La densità di probabilità congiunta di osservare la misura $(x_i, y_i)$ dato il punto vero $(x_i^*, f(x_i^*; \boldsymbol{\theta}))$ è data da:
+\begin{equation}
+    P(x_i, y_i \mid x_i^*, \boldsymbol{\theta}) = \frac{1}{2\pi \sigma_{x, i} \sigma_{y, i}} \exp\left( -\frac{1}{2} \left[ \left(\frac{x_i - x_i^*}{\sigma_{x, i}}\right)^2 + \left(\frac{y_i - f(x_i^*; \boldsymbol{\theta})}{\sigma_{y, i}}\right)^2 \right] \right)
+\end{equation}
+Data l'indipendenza statistica delle $N$ misure, la funzione di verosimiglianza globale (Likelihood) per l'intero campione vale:
+\begin{equation}
+    L(\boldsymbol{\theta}, \mathbf{x}^*) = \prod_{i=1}^N P(x_i, y_i \mid x_i^*, \boldsymbol{\theta}) = \left( \prod_{i=1}^N \frac{1}{2\pi \sigma_{x, i} \sigma_{y, i}} \right) \exp\left( -\frac{1}{2} \sum_{i=1}^N \left[ \left(\frac{x_i - x_i^*}{\sigma_{x, i}}\right)^2 + \left(\frac{y_i - f(x_i^*; \boldsymbol{\theta})}{\sigma_{y, i}}\right)^2 \right] \right)
+\end{equation}
+Il principio di massima verosimiglianza richiede di massimizzare $L$ simultaneamente rispetto ai parametri fisici di interesse $\boldsymbol{\theta}$ e agli $N$ parametri di disturbo $\mathbf{x}^* = (x_1^*, \dots, x_N^*)$. Definendo la log-verosimiglianza negativa $\mathcal{L} = -\ln L$:
+\begin{equation}
+    \mathcal{L}(\boldsymbol{\theta}, \mathbf{x}^*) = \frac{1}{2} \sum_{i=1}^N \left[ \left(\frac{x_i - x_i^*}{\sigma_{x, i}}\right)^2 + \left(\frac{y_i - f(x_i^*; \boldsymbol{\theta})}{\sigma_{y, i}}\right)^2 \right] + \sum_{i=1}^N \ln(2\pi \sigma_{x, i} \sigma_{y, i})
+\end{equation}
+Poiché il secondo termine è una costante dipendente unicamente dalle precisioni strumentali note a priori, la massimizzazione di $L$ equivale rigorosamente alla minimizzazione del funzionale di costo quadratico bidimensionale:
+\begin{equation}
+    S(\boldsymbol{\theta}, \mathbf{x}^*) = \sum_{i=1}^N \left[ \left(\frac{x_i - x_i^*}{\sigma_{x, i}}\right)^2 + \left(\frac{y_i - f(x_i^*; \boldsymbol{\theta})}{\sigma_{y, i}}\right)^2 \right]
+    \label{eq:odr_fundamental}
+\end{equation}
+Se poniamo $\delta_i = x_i^* - x_i$, l'equazione \eqref{eq:odr_fundamental} assume la forma canonica dell'\emph{Orthogonal Distance Regression} (ODR):
+\begin{equation}
+    S(\boldsymbol{\theta}, \boldsymbol{\delta}) = \sum_{i=1}^N \left[ \left(\frac{\delta_i}{\sigma_{x, i}}\right)^2 + \left(\frac{y_i - f(x_i + \delta_i; \boldsymbol{\theta})}{\sigma_{y, i}}\right)^2 \right]
+\end{equation}
+Nel caso limite in cui l'incertezza sulla coordinata indipendente sia trascurabile rispetto alla dinamica del problema ($\sigma_{x, i} \to 0$), la condizione di consistenza fisica impone che $x_i^* \to x_i$, ossia $\delta_i \to 0$. Il funzionale collassa naturalmente sui minimi quadrati verticali ordinari (OLS):
+\begin{equation}
+    \lim_{\sigma_x \to 0} S(\boldsymbol{\theta}, \boldsymbol{\delta}) = \chi^2_{\text{OLS}}(\boldsymbol{\theta}) = \sum_{i=1}^N \left(\frac{y_i - f(x_i; \boldsymbol{\theta})}{\sigma_{y, i}}\right)^2
+\end{equation}
+
+\subsection{Geometria della Proiezione Ortogonale e Degenerazioni Periodiche}
+
+Per un vettore di parametri $\boldsymbol{\theta}$ assegnato, il minimo rispetto a ciascun parametro di disturbo $\delta_i$ si determina imponendo la stazionarietà della derivata parziale unidimensionale:
+\begin{equation}
+    \frac{\partial}{\partial \delta_i} \left[ \left(\frac{\delta_i}{\sigma_{x, i}}\right)^2 + \left(\frac{y_i - f(x_i + \delta_i; \boldsymbol{\theta})}{\sigma_{y, i}}\right)^2 \right] = 0
+\end{equation}
+Eseguendo la differenziazione:
+\begin{equation}
+    \frac{2 \delta_i}{\sigma_{x, i}^2} - \frac{2 [y_i - f(x_i + \delta_i; \boldsymbol{\theta})]}{\sigma_{y, i}^2} \left.\frac{\partial f}{\partial x}\right|_{x_i + \delta_i} = 0
+\end{equation}
+Riorganizzando i termini, si ricava la \textbf{condizione geometrica fondamentale di ortogonalità pesata}:
+\begin{equation}
+    \frac{y_i - f(x_i + \delta_i; \boldsymbol{\theta})}{\delta_i} = - \frac{\sigma_{y, i}^2}{\sigma_{x, i}^2} \frac{1}{\left.\frac{\partial f}{\partial x}\right|_{x_i + \delta_i}}
+    \label{eq:ortogonalita}
+\end{equation}
+L'equazione \eqref{eq:ortogonalita} stabilisce che nel piano riscalato delle coordinate adimensionali:
+\begin{equation}
+    u = \frac{x}{\sigma_x}, \qquad v = \frac{y}{\sigma_y}
+\end{equation}
+il vettore congiungente il dato sperimentale $(u_i, v_i)$ con il punto ottimo sulla curva $(u_i^*, v_i^*)$ è rigorosamente perpendicolare al vettore tangente alla curva stessa.
+
+\subsubsection{Origine dell'Aliasing e dei Minimi Spuri}
+Quando il modello $f(x; \boldsymbol{\theta})$ è periodico (es. $f(x) = A \sin(\omega x + \phi)$), la derivata prima $\partial f / \partial x$ oscilla indefinitamente tra $-A\omega$ e $+A\omega$. 
+L'equazione \eqref{eq:ortogonalita} cessa di ammettere una soluzione unica e diventa multi-modale, presentando infiniti zeri locali lungo l'asse $x$. 
+Se l'algoritmo di ottimizzazione sposta il parametro di frequenza $\omega \to \infty$, il periodo spaziale dell'onda $T = 2\pi / \omega$ collassa a valori inferiori alla risoluzione sperimentale $\sigma_x$. 
+In tale limite asintotico:
+\begin{equation}
+    \forall (x_i, y_i) \quad \exists \, \delta_i \text{ con } |\delta_i| \le \frac{\pi}{\omega} \to 0 \quad \text{tale che} \quad f(x_i + \delta_i) = y_i
+\end{equation}
+Di conseguenza, il residuo verticale si annulla identicamente ($y_i - f = 0$) con scostamenti $\delta_i$ arbitrariamente piccoli, portando il costo globale $S \to 0$ ($\chi^2_{\text{rid}} \to 0$). Si genera così una buca di potenziale infinitamente profonda (\emph{minimo degenere ad alta frequenza}) che attrae i solutori privi di regolarizzazione. Per questa ragione, qualunque regressione ortogonale su oscillatori non lineari richiede la definizione di confini fisici (\texttt{limits}) su $\omega$ o una scansione globale preventiva.
+
+\subsection{Dimostrazione Analitica del Bias da Varianza Effettiva}
+\label{sec:bias_proof}
+
+Dimostriamo in modo formale perché il metodo euristico basato sulla varianza effettiva mobile genera stime asintoticamente inconsistenti e distorte dei parametri.
+Consideriamo la funzione di costo linearizzata:
+\begin{equation}
+    \chi^2_{\text{lin}}(\boldsymbol{\theta}) = \sum_{i=1}^N \frac{r_i^2(\boldsymbol{\theta})}{\sigma_{\text{eff}, i}^2(\boldsymbol{\theta})}
+\end{equation}
+dove definiamo il residuo verticale $r_i(\boldsymbol{\theta}) = y_i - f(x_i; \boldsymbol{\theta})$ e la varianza efficace propagata al primo ordine:
+\begin{equation}
+    \sigma_{\text{eff}, i}^2(\boldsymbol{\theta}) = \sigma_{y, i}^2 + \left( f'_i(\boldsymbol{\theta}) \sigma_{x, i} \right)^2, \qquad \text{avendo posto } f'_i(\boldsymbol{\theta}) \equiv \left.\frac{\partial f}{\partial x}\right|_{x_i; \boldsymbol{\theta}}
+\end{equation}
+Calcoliamo la derivata parziale esatta di $\chi^2_{\text{lin}}$ rispetto a una componente $\theta_j$ del vettore dei parametri:
+\begin{align}
+    \frac{\partial \chi^2_{\text{lin}}}{\partial \theta_j} &= \sum_{i=1}^N \frac{\partial}{\partial \theta_j} \left[ r_i^2(\boldsymbol{\theta}) \cdot \left(\sigma_{\text{eff}, i}^2(\boldsymbol{\theta})\right)^{-1} \right] \nonumber \\
+    &= \sum_{i=1}^N \left[ 2 r_i \frac{\partial r_i}{\partial \theta_j} \frac{1}{\sigma_{\text{eff}, i}^2} - \frac{r_i^2}{\left(\sigma_{\text{eff}, i}^2\right)^2} \frac{\partial \sigma_{\text{eff}, i}^2}{\partial \theta_j} \right]
+\end{align}
+Poiché $\frac{\partial r_i}{\partial \theta_j} = - \frac{\partial f(x_i; \boldsymbol{\theta})}{\partial \theta_j}$ e differenziando la varianza:
+\begin{equation}
+    \frac{\partial \sigma_{\text{eff}, i}^2}{\partial \theta_j} = \frac{\partial}{\partial \theta_j} \left[ \sigma_{y, i}^2 + \left( f'_i(\boldsymbol{\theta}) \right)^2 \sigma_{x, i}^2 \right] = 2 f'_i(\boldsymbol{\theta}) \frac{\partial f'_i(\boldsymbol{\theta})}{\partial \theta_j} \sigma_{x, i}^2
+\end{equation}
+otteniamo l'espressione rigorosa del gradiente:
+\begin{equation}
+    \frac{\partial \chi^2_{\text{lin}}}{\partial \theta_j} = \underbrace{- 2 \sum_{i=1}^N \frac{y_i - f(x_i; \boldsymbol{\theta})}{\sigma_{\text{eff}, i}^2(\boldsymbol{\theta})} \frac{\partial f(x_i; \boldsymbol{\theta})}{\partial \theta_j}}_{\text{Termine Fisico di Discesa } G_j(\boldsymbol{\theta})} \underbrace{- 2 \sum_{i=1}^N \frac{(y_i - f(x_i; \boldsymbol{\theta}))^2}{\left(\sigma_{\text{eff}, i}^2(\boldsymbol{\theta})\right)^2} \left( f'_i(\boldsymbol{\theta}) \frac{\partial f'_i(\boldsymbol{\theta})}{\partial \theta_j} \sigma_{x, i}^2 \right)}_{\text{Termine di Bias Spuro } B_j(\boldsymbol{\theta})}
+    \label{eq:gradient_bias}
+\end{equation}
+Nel punto di minimo stimato $\hat{\boldsymbol{\theta}}$, l'algoritmo impone l'annullamento del gradiente globale:
+\begin{equation}
+    \left.\frac{\partial \chi^2_{\text{lin}}}{\partial \theta_j}\right|_{\hat{\boldsymbol{\theta}}} = 0 \implies G_j(\hat{\boldsymbol{\theta}}) = - B_j(\hat{\boldsymbol{\theta}})
+\end{equation}
+Calcoliamo ora il valore atteso statistico del termine $B_j$ sul collettivo delle realizzazioni sperimentali, valutato attorno ai parametri veri $\boldsymbol{\theta}^*$. 
+Dalla definizione di varianza totale, il valore atteso del quadrato del residuo è:
+\begin{equation}
+    \mathbb{E}\left[ (y_i - f(x_i; \boldsymbol{\theta}^*))^2 \right] = \sigma_{\text{eff}, i}^2(\boldsymbol{\theta}^*)
+\end{equation}
+Sostituendo nel valore atteso del termine $B_j$:
+\begin{align}
+    \mathbb{E}\left[ B_j(\boldsymbol{\theta}^*) \right] &= - 2 \sum_{i=1}^N \frac{\mathbb{E}\left[ (y_i - f(x_i; \boldsymbol{\theta}^*))^2 \right]}{\left(\sigma_{\text{eff}, i}^2(\boldsymbol{\theta}^*)\right)^2} \left( f'_i(\boldsymbol{\theta}^*) \frac{\partial f'_i(\boldsymbol{\theta}^*)}{\partial \theta_j} \sigma_{x, i}^2 \right) \nonumber \\
+    &= - 2 \sum_{i=1}^N \frac{\sigma_{\text{eff}, i}^2(\boldsymbol{\theta}^*)}{\left(\sigma_{\text{eff}, i}^2(\boldsymbol{\theta}^*)\right)^2} \left( f'_i(\boldsymbol{\theta}^*) \frac{\partial f'_i(\boldsymbol{\theta}^*)}{\partial \theta_j} \sigma_{x, i}^2 \right) \nonumber \\
+    &= - \sum_{i=1}^N \frac{1}{\sigma_{\text{eff}, i}^2(\boldsymbol{\theta}^*)} \frac{\partial \sigma_{\text{eff}, i}^2(\boldsymbol{\theta}^*)}{\partial \theta_j} = - \frac{\partial}{\partial \theta_j} \left( \sum_{i=1}^N \ln \sigma_{\text{eff}, i}^2(\boldsymbol{\theta}^*) \right) \neq 0
+\end{align}
+Il valore atteso del termine spuro **non è nullo**. Al contrario, per il termine canonico $G_j$, essendo $\mathbb{E}[y_i - f(x_i; \boldsymbol{\theta}^*)] = 0$:
+\begin{equation}
+    \mathbb{E}\left[ G_j(\boldsymbol{\theta}^*) \right] = 0
+\end{equation}
+Di conseguenza, al valore vero dei parametri:
+\begin{equation}
+    \mathbb{E}\left[ \left.\frac{\partial \chi^2_{\text{lin}}}{\partial \theta_j}\right|_{\boldsymbol{\theta}^*} \right] = - \mathbb{E}\left[ B_j(\boldsymbol{\theta}^*) \right] \neq 0
+\end{equation}
+La condizione di stazionarietà non è verificata sul parametro vero: lo stimatore $\hat{\boldsymbol{\theta}}$ ricavato minimizzando $\chi^2_{\text{lin}}$ è **intrinsecamente distorto (biased)**. 
+L'ottimizzatore viene forzato a deviare verso regioni dello spazio parametrico in cui $\sigma_{\text{eff}, i}^2$ è più grande (per rendere $B_j$ positivo), preferendo curve con pendenze artificialmente ripide pur di dilatare i denominatori.
+
+\subsubsection{Perché il Metodo A Risolve il Teorema del Bias}
+Nel Metodo A, la derivata spaziale viene calcolata numericamente sul vettore $\mathbf{p}_{\text{ref}}$ scaturito dalla stima preliminare e congelata come costante numerica:
+\begin{equation}
+    \sigma_{\text{tot}, i}^2 \equiv \sigma_{y, i}^2 + \left( \left.\frac{\partial f}{\partial x}\right|_{x_i; \mathbf{p}_{\text{ref}}} \sigma_{x, i} \right)^2 \implies \frac{\partial \sigma_{\text{tot}, i}^2}{\partial \theta_j} \equiv 0 \quad \forall j
+\end{equation}
+Ne consegue identicamente:
+\begin{equation}
+    B_j(\boldsymbol{\theta}) \equiv 0 \implies \mathbb{E}\left[ \left.\frac{\partial \chi^2_{\text{Metodo A}}}{\partial \theta_j}\right|_{\boldsymbol{\theta}^*} \right] = 0
+\end{equation}
+L'annullamento identico del gradiente di scala elimina la distorsione asintotica, garantendo stime non distorte ed efficienti al limite di grandi campioni.
+
+\subsection{Statistica Asintotica della Distribuzione $\chi^2$ e Gradi di Libertà}
+
+Sia $\hat{\boldsymbol{\theta}}$ lo stimatore di massima verosimiglianza ricavato su un campione di $N$ punti con $p$ parametri liberi. Espandendo in serie di Taylor la funzione $f(x_i; \boldsymbol{\theta})$ attorno al vettore vero $\boldsymbol{\theta}^*$:
+\begin{equation}
+    f(x_i; \boldsymbol{\theta}) \approx f(x_i; \boldsymbol{\theta}^*) + \sum_{j=1}^p J_{ij} (\theta_j - \theta_j^*), \qquad J_{ij} = \left.\frac{\partial f(x_i; \boldsymbol{\theta})}{\partial \theta_j}\right|_{\boldsymbol{\theta}^*}
+\end{equation}
+In forma matriciale vettoriale, introducendo la matrice Jacobiana $\mathbf{J} \in \mathbb{R}^{N \times p}$ e la matrice diagonale dei pesi $\mathbf{W} \in \mathbb{R}^{N \times N}$ con $W_{ii} = 1/\sigma_{\text{tot}, i}^2$, il vettore dei residui linearizzato vale:
+\begin{equation}
+    \mathbf{r}(\boldsymbol{\theta}) = \mathbf{y} - \mathbf{f}(\boldsymbol{\theta}) \approx \Delta \mathbf{y} - \mathbf{J} \Delta \boldsymbol{\theta}
+\end{equation}
+dove $\Delta \mathbf{y} \sim \mathcal{N}(\mathbf{0}, \mathbf{W}^{-1})$. La minimizzazione quadratica:
+\begin{equation}
+    \chi^2(\boldsymbol{\theta}) = \mathbf{r}^T \mathbf{W} \mathbf{r} = (\Delta \mathbf{y} - \mathbf{J} \Delta \boldsymbol{\theta})^T \mathbf{W} (\Delta \mathbf{y} - \mathbf{J} \Delta \boldsymbol{\theta})
+\end{equation}
+fornisce la soluzione standard per i parametri ottimi:
+\begin{equation}
+    \Delta \hat{\boldsymbol{\theta}} = (\mathbf{J}^T \mathbf{W} \mathbf{J})^{-1} \mathbf{J}^T \mathbf{W} \Delta \mathbf{y}
+\end{equation}
+Sostituendo $\Delta \hat{\boldsymbol{\theta}}$ all'interno del residuo ottimo:
+\begin{equation}
+    \hat{\mathbf{r}} = \Delta \mathbf{y} - \mathbf{J} \Delta \hat{\boldsymbol{\theta}} = \left[ \mathbf{I}_N - \mathbf{J} (\mathbf{J}^T \mathbf{W} \mathbf{J})^{-1} \mathbf{J}^T \mathbf{W} \right] \Delta \mathbf{y} = (\mathbf{I}_N - \mathbf{P}) \Delta \mathbf{y}
+\end{equation}
+dove $\mathbf{P} = \mathbf{J} (\mathbf{J}^T \mathbf{W} \mathbf{J})^{-1} \mathbf{J}^T \mathbf{W}$ è la matrice di proiezione ortogonale nello spazio pesato (\emph{Hat Matrix}). Calcoliamo il valore ottimo della forma quadratica:
+\begin{equation}
+    \chi^2_{\text{min}} = \hat{\mathbf{r}}^T \mathbf{W} \hat{\mathbf{r}} = \Delta \mathbf{y}^T (\mathbf{I}_N - \mathbf{P})^T \mathbf{W} (\mathbf{I}_N - \mathbf{P}) \Delta \mathbf{y}
+\end{equation}
+Poiché $\mathbf{P} \mathbf{J} = \mathbf{J}$, si dimostra per sostituzione algebrica diretta che:
+\begin{equation}
+    (\mathbf{I}_N - \mathbf{P})^T \mathbf{W} (\mathbf{I}_N - \mathbf{P}) = \mathbf{W} (\mathbf{I}_N - \mathbf{P})
+\end{equation}
+Definendo il vettore standardizzato $\mathbf{z} = \mathbf{W}^{1/2} \Delta \mathbf{y} \sim \mathcal{N}(\mathbf{0}, \mathbf{I}_N)$, la forma quadratica diventa:
+\begin{equation}
+    \chi^2_{\text{min}} = \mathbf{z}^T \left[ \mathbf{I}_N - \mathbf{W}^{1/2} \mathbf{J} (\mathbf{J}^T \mathbf{W} \mathbf{J})^{-1} \mathbf{J}^T \mathbf{W}^{1/2} \right] \mathbf{z} = \mathbf{z}^T \mathbf{M} \mathbf{z}
+\end{equation}
+La matrice $\mathbf{M}$ è simmetrica e idempotente ($\mathbf{M}^2 = \mathbf{M}$). In virtù del \textbf{Teorema di Cochran}, una forma quadratica $\mathbf{z}^T \mathbf{M} \mathbf{z}$ di variabili normali standard segue esattamente una distribuzione chi-quadro il cui numero di gradi di libertà è pari alla traccia di $\mathbf{M}$:
+\begin{align}
+    \nu = \operatorname{tr}(\mathbf{M}) &= \operatorname{tr}(\mathbf{I}_N) - \operatorname{tr}\left( \mathbf{W}^{1/2} \mathbf{J} (\mathbf{J}^T \mathbf{W} \mathbf{J})^{-1} \mathbf{J}^T \mathbf{W}^{1/2} \right) \nonumber \\
+    &= N - \operatorname{tr}\left( (\mathbf{J}^T \mathbf{W} \mathbf{J})^{-1} (\mathbf{J}^T \mathbf{W} \mathbf{J}) \right) = N - \operatorname{tr}(\mathbf{I}_p) = N - p
+\end{align}
+Resta così dimostrato che la riduzione dei gradi di libertà da $N$ a $N-p$ deriva direttamente dal rango della proiezione sui vincoli imposti dai parametri stimati.
+
+\subsection{Geometria delle Matrici di Errore: Curvatura (HESSE) vs Profilo (MINOS)}
+
+\subsubsection{L'Approssimazione Parabolica Locale: HESSE}
+Attorno al punto di stazionarietà $\hat{\boldsymbol{\theta}}$, lo sviluppo di Taylor del costo è privo di termini lineari:
+\begin{equation}
+    \chi^2(\boldsymbol{\theta}) = \chi^2(\hat{\boldsymbol{\theta}}) + \frac{1}{2} (\boldsymbol{\theta} - \hat{\boldsymbol{\theta}})^T \mathbf{H} (\boldsymbol{\theta} - \hat{\boldsymbol{\theta}}) + \mathcal{O}(\|\boldsymbol{\theta} - \hat{\boldsymbol{\theta}}\|^3)
+\end{equation}
+dove l'Hessiana $\mathbf{H} \in \mathbb{R}^{p \times p}$ definisce l'operatore di curvatura locale:
+\begin{equation}
+    H_{jk} = \left. \frac{\partial^2 \chi^2}{\partial \theta_j \partial \theta_k} \right|_{\hat{\boldsymbol{\theta}}}
+\end{equation}
+In virtù del limite di Cramér-Rao, l'inversa della matrice di curvatura fornisce una stima asintoticamente efficiente della matrice di covarianza $\mathbf{V}$:
+\begin{equation}
+    \mathbf{V} = \operatorname{cov}(\hat{\boldsymbol{\theta}}) = 2 \, \mathbf{H}^{-1}
+\end{equation}
+I coefficienti di correlazione lineare tra le stime dei parametri si ricavano dalla normalizzazione degli elementi fuori diagonale:
+\begin{equation}
+    \rho_{jk} = \frac{V_{jk}}{\sqrt{V_{jj} V_{kk}}} \in [-1, +1]
+\end{equation}
+L'ellissoide di confidenza a $1\sigma$ è definito dal luogo dei punti:
+\begin{equation}
+    \Delta \chi^2(\boldsymbol{\theta}) = \chi^2(\boldsymbol{\theta}) - \chi^2(\hat{\boldsymbol{\theta}}) = (\boldsymbol{\theta} - \hat{\boldsymbol{\theta}})^T \mathbf{V}^{-1} (\boldsymbol{\theta} - \hat{\boldsymbol{\theta}}) \le 1.0
+\end{equation}
+Se proiettiamo questo ellissoide lungo l'asse del singolo parametro $\theta_j$, la semi-ampiezza dell'intervallo coincide con l'errore standard HESSE:
+\begin{equation}
+    \sigma_{j, \text{hesse}} = \sqrt{V_{jj}}
+\end{equation}
+
+\subsubsection{Il Principio del Profilo di Verosimiglianza: MINOS}
+Nel momento in cui il modello presenta forti non-linearità parametriche, i termini del terzo ordine $\mathcal{O}(\|\Delta \boldsymbol{\theta}\|^3)$ cessano di essere trascurabili: le superfici equipotenziali di $\chi^2$ si deformano assumendo geometrie a pera, a banana o a sella, invalidando l'ipotesi di confidenza simmetrica.
+Il metodo MINOS supera l'approssimazione parabolica costruendo la \textbf{funzione di profilo di verosimiglianza}:
+\begin{equation}
+    \chi^2_{\text{prof}}(\theta_j) \equiv \min_{\{\theta_k : k \neq j\}} \chi^2(\theta_j, \theta_1, \dots, \theta_{j-1}, \theta_{j+1}, \dots, \theta_p)
+\end{equation}
+Per ogni valore fissato di $\theta_j$, MINOS rilassa il sistema ri-ottimizzando tutti i restanti $p-1$ parametri dimensionali, individuando il minimo vincolato lungo il fondovalle della superficie di costo.
+Gli estremi dell'intervallo di confidenza al livello di confidenza $\beta$ (dove $\beta = 1.0$ corrisponde al $68.27\%$ per un singolo grado di libertà) sono definiti dalle radici esatte dell'equazione scalare implicita:
+\begin{equation}
+    \chi^2_{\text{prof}}(\theta_j) - \chi^2_{\text{min}} = \Delta \chi^2_{\text{target}} \quad (\text{con } \Delta \chi^2_{\text{target}} = 1.0)
+\end{equation}
+Tale equazione ammette in generale due radici disuguali:
+\begin{equation}
+    \theta_j^+ = \hat{\theta}_j + \Delta \theta_j^+, \qquad \theta_j^- = \hat{\theta}_j - \Delta \theta_j^-
+\end{equation}
+con $\Delta \theta_j^+ \neq \Delta \theta_j^-$. Questa discrepanza rappresenta la vera asimmetria statistica della misura, correlando direttamente la curvatura non gaussiana con la dispersione dei residui sperimentali.
+
+\subsection{Analisi dei Residui Normalizzati (\emph{Pulls}) e Diagnostica di Consistenza}
+
+La valutazione della bontà del fit non può esaurirsi nell'esame del valore globale $\chi^2_{\text{rid}}$, il quale rappresenta una media globale che può mascherare deviazioni sistematiche locali o compensazioni accidentali tra punti con varianze sovrastimate e sottostimate.
+Lo strumento diagnostico locale per eccellenza è lo studio dei "residui normalizzati" o \emph{pulls}.
+
+\subsubsection{Definizione e Teoria dei Pulls}
+Dato il punto sperimentale $(x_i, y_i)$, il residuo verticale grezzo rispetto alla curva stimata è:
+\begin{equation}
+    r_i = y_i - f(x_i; \hat{\boldsymbol{\theta}})
+\end{equation}
+Nel formalismo dell'ODR Metodo A, la varianza combinata complessiva associata a tale osservazione vale:
+\begin{equation}
+    \sigma_{\text{tot}, i}^2 = \sigma_{y, i}^2 + \left( \left.\frac{\partial f}{\partial x}\right|_{x_i; \mathbf{p}_{\text{ref}}} \sigma_{x, i} \right)^2
+\end{equation}
+Il residuo normalizzato (pull) $z_i$ è definito come il rapporto adimensionale:
+\begin{equation}
+    z_i = \frac{y_i - f(x_i; \hat{\boldsymbol{\theta}})}{\sigma_{\text{tot}, i}}
+\end{equation}
+Se il modello fisico $f(x; \boldsymbol{\theta})$ descrive fedelmente il fenomeno naturale e le incertezze sperimentali $\sigma_{x, i}$ e $\sigma_{y, i}$ sono state stimate correttamente e hanno natura gaussiana, ciascun pull $z_i$ costituisce una variabile casuale che deve seguire asintoticamente la **distribuzione normale standard**:
+\begin{equation}
+    z_i \sim \mathcal{N}(\mu = 0, \, \sigma^2 = 1)
+\end{equation}
+
+\subsubsection{Proprietà Diagnostiche dei Momenti Statistici dei Pulls}
+Dato il collettivo dei pulls campionari $\{z_i\}_{i=1}^N$, si calcolano i momenti campionari:
+\begin{equation}
+    \bar{z} = \frac{1}{N} \sum_{i=1}^N z_i, \qquad s_z^2 = \frac{1}{N - 1} \sum_{i=1}^N (z_i - \bar{z})^2
+\end{equation}
+L'interpretazione delle deviazioni dai valori ideali fornisce indicazioni precise sullo stato dell'analisi:
+\begin{itemize}
+    \item \textbf{Media non nulla ($\bar{z} \neq 0$)}: indica la presenza di un errore sistematico costante (offset non modellizzato, taratura dello zero errata o fondo non sottratto).
+    \item \textbf{Varianza significativamente minore di uno ($s_z^2 \ll 1$)}: le barre di incertezza strumentali fornite in ingresso ($\sigma_x$ o $\sigma_y$) sono state sovrastimate a priori, oppure il modello ha un numero eccessivo di parametri liberi rispetto alla complessità del segnale (\emph{overfitting}).
+    \item \textbf{Varianza significativamente maggiore di uno ($s_z^2 \gg 1$)}: le incertezze strumentali sono state sottostimate, oppure sono presenti sorgenti di rumore non termico/gaussiano (fluttuazioni flicker, disturbi ambientali o errori di quantizzazione).
+    \item \textbf{Correlazione seriale tra residui adiacenti}: se il grafico temporale dei pulls mostra andamenti a onde o raggruppamenti di segni uguali consecutivi, il modello teorico è matematicamente inadeguato (ad esempio, si sta fittando un fenomeno quadratico con una relazione lineare).
+\end{itemize}
+
+L'analisi congiunta di $\chi^2_{\text{rid}} \approx 1$, $p\text{-value} \in [0.05, 0.95]$ e una distribuzione dei pulls con $\bar{z} \approx 0$ e $s_z \approx 1$ costituisce il criterio necessario e sufficiente per dichiarare un fit statisticamente valido e conforme ai criteri di riproducibilità scientifica internazionale.
+
+\end{document}

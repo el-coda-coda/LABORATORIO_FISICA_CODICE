@@ -58,7 +58,9 @@ class RisultatiFit:
     metodo_init: str
     valid: bool
     covariance: np.ndarray
-    residui: np.ndarray
+    residui: np.ndarray          # Residui grezzi: y - f(x)
+    pulls: np.ndarray            # Residui normalizzati: (y - f(x)) / sigma_tot
+    sigma_tot: np.ndarray        # Incertezza efficace totale per ogni punto
     minuit_obj: Minuit
 
     def __getitem__(self, nome: str) -> ParametroFit:
@@ -121,7 +123,7 @@ class _CostoODR_linearizzato:
 
 
 class _CostoODR:
-    """Costo chi-quadro Metodo A: Varianza congelata sul punto ottimo ODR (Privo di bias)."""
+    """Costo chi-quadro: Varianza congelata sul punto ottimo ODR (Privo di bias)."""
     errordef = Minuit.LEAST_SQUARES
 
     def __init__(self, model: Callable, x: np.ndarray, y: np.ndarray, sigma_x: np.ndarray, sigma_y: np.ndarray, p_ref: Optional[np.ndarray] = None):
@@ -248,7 +250,7 @@ class FitPipeline:
         y: np.ndarray,
         err_x: Optional[np.ndarray] = None,
         err_y: Optional[np.ndarray] = None,
-        odr_lin_Newton: bool = True,
+        odr_lin_Newton: bool = True, # Se True, utilizza il metodo ODR con varianza congelata, altrimenti utilizza il metodo linearizzato (soggetto a bias).
     ) -> RisultatiFit:
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
@@ -302,6 +304,17 @@ class FitPipeline:
 
         y_pred = self._model(x, *m.values)
         residui = y - y_pred
+
+        # Calcolo della varianza totale combinata ODR su ciascun punto
+        if np.any(err_x > 0):
+            x_scale = np.ptp(x) if np.ptp(x) > 0 else 1.0
+            h = 1e-5 * (np.abs(x) + 0.01 * x_scale)
+            dfdx = (self._model(x + h, *m.values) - self._model(x - h, *m.values)) / (2.0 * h)
+            sigma_tot = np.sqrt(err_y**2 + (dfdx * err_x)**2)
+        else:
+            sigma_tot = err_y.copy()
+
+        pulls = residui / sigma_tot
         dof = len(x) - m.nfit
         chi2_val = float(m.fval)
         chi2_rid = chi2_val / dof if dof > 0 else float('nan')
@@ -319,6 +332,8 @@ class FitPipeline:
             valid=m.valid,
             covariance=cov_matrix,
             residui=residui,
+            pulls=pulls,           
+            sigma_tot=sigma_tot,
             minuit_obj=m,
         )
 
@@ -442,6 +457,22 @@ class GlobalFitPipeline:
         dof = n_punti_tot - m.nfit
         chi2_val = float(m.fval)
 
+        # Calcolo sigma_tot e pulls concatenati per la pipeline globale
+        sigma_tot_list = []
+        for mod, x, sx, sy in zip(self._models, xs, err_xs, err_ys):
+            if np.any(sx > 0):
+                x_scale = np.ptp(x) if np.ptp(x) > 0 else 1.0
+                h = 1e-5 * (np.abs(x) + 0.01 * x_scale)
+                dfdx = (mod(x + h, *m.values) - mod(x - h, *m.values)) / (2.0 * h)
+                s_tot = np.sqrt(sy**2 + (dfdx * sx)**2)
+            else:
+                s_tot = sy.copy()
+            sigma_tot_list.append(s_tot)
+
+        residui_concat = np.concatenate(residui_list)
+        sigma_tot_concat = np.concatenate(sigma_tot_list)
+        pulls_concat = residui_concat / sigma_tot_concat
+
         res = RisultatiFit(
             parametri=parametri,
             chi2=chi2_val,
@@ -451,7 +482,9 @@ class GlobalFitPipeline:
             metodo_init=f"iminuit (via {metodo_init})",
             valid=m.valid,
             covariance=cov_matrix,
-            residui=np.concatenate(residui_list),
+            residui=residui_concat,
+            pulls=pulls_concat,           
+            sigma_tot=sigma_tot_concat,  
             minuit_obj=m,
         )
 
@@ -503,7 +536,7 @@ if __name__ == "__main__":
     ax2.errorbar(t, res1.residui, yerr=s_y, fmt='.', alpha=0.4)
     ax2.axhline(0, color='r', ls='--'); ax2.set_ylabel('residui'); ax2.set_xlabel('t [s]')
     fig1.tight_layout()
-    fig1.savefig(save_folder / "fit_pipeline_esempio.pdf", dpi=300, bbox_inches="tight")
+    fig1.savefig(f"{save_folder / 'fit_pipeline_esempio.pdf'}", dpi=300, bbox_inches="tight")
     print("\nGrafico Esempio 1 salvato.")
 
     # ──────────────────────────────────────────────────────────────────────────────
@@ -570,7 +603,7 @@ if __name__ == "__main__":
     ax_bot.set_xlabel("x")
     ax_bot.legend()
     fig2.tight_layout()
-    fig2.savefig(save_folder / "fit_odr_difference.pdf", dpi=300, bbox_inches="tight")
+    fig2.savefig(f"{save_folder / 'fit_odr_difference.pdf'}", dpi=300, bbox_inches="tight")
 
     print("Grafico Esempio 2 salvato.")
     
@@ -618,14 +651,14 @@ if __name__ == "__main__":
     # Residui normalizzati (pulls)
     # Calcolo dell'errore totale efficace per i residui
     m_fit = res_lin["m"].valore
-    sigma_eff_lin = np.sqrt(err_y_lin**2 + (m_fit * err_x_lin)**2)
-    ax2.errorbar(x_lin_meas, res_lin.residui / sigma_eff_lin, yerr=np.ones_like(x_lin_meas), fmt='o', color='black', alpha=0.6)
+    ax2.errorbar(x_lin_meas, res_lin.pulls, yerr=np.ones_like(x_lin_meas), fmt='o', color='black', alpha=0.6)
     ax2.axhline(0, color='r', ls='--')
-    ax2.set_ylabel("Pulls $(y - y_{\\rm fit}) / \\sigma_{\\rm eff}$")
+    ax2.set_ylabel("Pulls [$\\sigma$]")
+    ax2.set_xlabel("Grandezza applicata $x$ [u.a.]")
     ax2.set_xlabel("Grandezza applicata $x$ [u.a.]")
     fig3.tight_layout()
-    fig3.savefig(save_folder / "esempio_3_fit_lineare.pdf", dpi=300, bbox_inches="tight")
-    
+    fig3.savefig(f"{save_folder / 'esempio_3_fit_lineare.pdf'}", dpi=300, bbox_inches="tight")
+
     # ──────────────────────────────────────────────────────────────────────────────
     # ESEMPIO 4: Picco Gaussiano con Fondo
     # ──────────────────────────────────────────────────────────────────────────────
@@ -668,12 +701,15 @@ if __name__ == "__main__":
     ax1.set_title("Spettro con picco gaussiano e risoluzione finita su $x$")
     ax1.legend()
 
-    ax2.errorbar(x_g_meas, res_gauss.residui, yerr=err_y_g, fmt='.', color='black', alpha=0.5)
-    ax2.axhline(0, color='g', ls='--')
-    ax2.set_ylabel("Residui")
+    # Pannello residui normalizzati (Pulls standardizzati attorno a 0 con sigma = 1)
+    ax2.errorbar(x_g_meas, res_gauss.pulls, yerr=np.ones_like(x_g_meas), fmt='.', alpha=0.5)
+    ax2.axhline(0, color='r', ls='--')
+    ax2.axhline(+1, color='gray', ls=':', alpha=0.7)
+    ax2.axhline(-1, color='gray', ls=':', alpha=0.7)
+    ax2.set_ylabel("Pulls [$\\sigma$]")
     ax2.set_xlabel("Canale energetico $x$ [keV]")
     fig4.tight_layout()
-    fig4.savefig(save_folder / "esempio_4_gaussiana.pdf", dpi=300, bbox_inches="tight")
+    fig4.savefig(f"{save_folder / 'esempio_4_gaussiana.pdf'}", dpi=300, bbox_inches="tight")
     
     # ──────────────────────────────────────────────────────────────────────────────
     # ESEMPIO 5: Stress-Test e recupero automatico da p0 sballati
@@ -721,7 +757,7 @@ if __name__ == "__main__":
     ax.set_ylabel("y")
     ax.legend()
     fig5.tight_layout()
-    fig5.savefig(save_folder / "esempio_5_recupero_globale.pdf", dpi=300, bbox_inches="tight")
+    fig5.savefig(f"{save_folder / 'esempio_5_recupero_globale.pdf'}", dpi=300, bbox_inches="tight")
 
-    print("\nTutti gli esempi aggiuntivi sono stati eseguiti e salvati correttamente.")
+    print("\nTutti gli esempi sono stati eseguiti e salvati correttamente.")
     plt.show()
