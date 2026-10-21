@@ -321,7 +321,7 @@ if __name__ == "__main__":
         stats_box_loc="inside_map",
         show_clabels=True,
         manual_clabels=False,
-        save_path=save_folder / "esempio_chi_squared_2d_map.pdf",
+        save_path=save_folder / "example_chi_squared_2d_map.pdf",
         show=True,
         cmap="viridis_r",
         spacing=0,
