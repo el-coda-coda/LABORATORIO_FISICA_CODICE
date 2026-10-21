@@ -1,0 +1,503 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{amsmath,amssymb,amsfonts,mathtools}
+\usepackage{geometry}
+\geometry{top=2.5cm, bottom=2.5cm, left=2.3cm, right=2.3cm}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{bm}
+
+% Configurazione per il codice Python
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.97,0.97,0.97}
+
+\lstdefinestyle{pythonstyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{blue}\bfseries,
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=4,
+    frame=single
+}
+\lstset{style=pythonstyle}
+
+\title{\textbf{Standard Tipografici ed Architettura Operativa per la Visualizzazione Dati di Laboratorio}\\\large Manuale Tecnico e Guida alle API dei Moduli \texttt{plot\_typo} e \texttt{chi\_squared\_2d\_map}}
+\author{Laboratorio di Fisica Sperimentale e Computazionale}
+\date{21 ottobre 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Questo manuale definisce le specifiche implementative, le convenzioni tipografiche e i protocolli d'uso dei moduli grafici \texttt{plot\_typo} e \texttt{chi\_squared\_2d\_map}. L'infrastruttura standardizza la produzione di figure scientifiche pronte per la pubblicazione su riviste internazionali (es. \emph{Physical Review}, \emph{European Physical Journal}). Vengono documentate in dettaglio: l'integrazione di \LaTeX\ reale con font Palatino (\texttt{mathpazo}), la gestione scalare e tipografica degli ordini di grandezza tramite \texttt{format\_sci\_axis}, il controllo indipendente delle scale lineari e logaritmiche con tacche centrate \texttt{inout} e griglie calibrate in \texttt{apply\_academic\_ticks\_and\_grid}, e l'architettura a griglia asimmetrica per le mappe bidimensionali profilate di confidenza $\Delta\chi^2$.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Introduzione e Specifiche Tipografiche}
+% ──────────────────────────────────────────────────────────────────────────────
+
+La presentazione visiva di misure fisiche ed elaborazioni numeriche richiede lo stesso rigore applicato alla modellizzazione teorica e all'analisi statistica. Nelle librerie grafiche ad alto livello (come \texttt{matplotlib} nelle sue configurazioni di default) si riscontrano sistematicamente difetti strutturali:
+\begin{enumerate}
+    \item \textbf{Disomogeneità dei font}: il testo degli assi usa font sans-serif di sistema, mentre le espressioni matematiche usano font TeX standard (Computer Modern), generando contrasti visivi sgradevoli.
+    \item \textbf{Cifre ridondanti e troncamenti casuali}: valori grandi o piccoli vengono stampati con $5$ o $6$ zeri continui (es. $90000, 105000$) oppure le etichette alternano cifre intere e decimali misti ($1, 1.05, 1.1$), violando la coerenza di lettura.
+    \item \textbf{Tacche orientate verso l'interno o asimmetriche}: le tacche \texttt{inside} entrano nel canvas oscurando i dati periferici, mentre le tacche \texttt{outside} collidono con le etichette numeriche.
+    \item \textbf{Pannelli residui disgiunti}: l'inserimento di spaziature vuote tra il pannello del fit e quello dei residui disperde l'allineamento visivo orizzontale punto-per-punto.
+\end{enumerate}
+
+I moduli descritti in questo manuale risolvono questi problemi alla radice attraverso routine modulari ad alta riusabilità.
+
+\subsection{Standard Tipografico di Laboratorio}
+
+La libreria adotta come riferimento il carattere \textbf{Palatino} per tutte le componenti del grafico:
+\begin{itemize}
+    \item \textbf{Testo descrittivo, legende e titoli}: Palatino tondo e corsivo;
+    \item \textbf{Formule, grandezze fisiche e simboli greci}: font matematico \texttt{mathpazo};
+    \item \textbf{Unità di misura}: sempre in carattere tondo (\texttt{\textbackslash mathrm\{...\}}), separate dal valore numerico o dal moltiplicatore da uno spazio sottile (\texttt{\textbackslash,}).
+\end{itemize}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Inizializzazione Globale: \texttt{setup\_academic\_style}}
+% ──────────────────────────────────────────────────────────────────────────────
+
+La funzione \texttt{setup\_academic\_style()} interviene direttamente sul dizionario globale \texttt{matplotlib.rcParams}, forzando la compilazione TeX per ogni singola stringa testuale.
+
+\begin{lstlisting}[language=Python, caption={Inizializzazione dello stile Palatino LaTeX.}]
+def setup_academic_style(
+    textsize: float = 11.0,
+    labelsize: float = 11.5,
+    ticksize: float = 10.0,
+    legendsize: float = 9.5,
+    titlesize: float = 11.5,
+) -> None:
+    plt.rcParams.update({
+        "text.usetex": True,
+        "font.family": "serif",
+        "font.serif": ["Palatino", "URW Palladio L", "TeX Gyre Pagella"],
+        "text.latex.preamble": r"""
+            \usepackage{amsmath}
+            \usepackage{amssymb}
+            \usepackage{mathpazo}
+        """,
+        "font.size": textsize,
+        "axes.labelsize": labelsize,
+        "xtick.labelsize": ticksize,
+        "ytick.labelsize": ticksize,
+        "legend.fontsize": legendsize,
+        "figure.titlesize": titlesize,
+    })
+\end{lstlisting}
+
+\subsection{Gerarchia dei Parametri Dimensionali}
+I valori di default garantiscono la leggibilità su stampe in formato A4 a singola o doppia colonna:
+\begin{itemize}
+    \item \texttt{labelsize = 11.5\,pt}: etichette delle coordinate $x$ e $y$;
+    \item \texttt{ticksize = 10.0\,pt}: valori numerici sui tick primari;
+    \item \texttt{legendsize = 9.5\,pt}: testo informativo delle legende;
+    \item \texttt{textsize = 11.0\,pt}: annotazioni interne e box statistici.
+\end{itemize}
+
+\newpage
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Normalizzazione Scientifica degli Assi: \texttt{format\_sci\_axis}}
+% ──────────────────────────────────────────────────────────────────────────────
+
+Nelle misure fisiche reali, i valori spaziano spesso su molti ordini di grandezza (es. frequenze in decine di kilohertz o tensioni in millivolt). La funzione \texttt{format\_sci\_axis} risolve l'estrazione automatica del fattore di scala $\times 10^n$, garantendo che:
+\begin{enumerate}
+    \item Le cifre numeriche visualizzate sulle tacche rimangano nell'intervallo $[0.1, 99]$;
+    \item Il numero di cifre decimali sia omogeneo su tutto l'asse;
+    \item L'unità di misura non collida con l'ambiente matematico e risieda sempre in tondo ($\mathrm{Hz}, \mathrm{V}, \mathrm{s}$).
+\end{enumerate}
+
+\begin{lstlisting}[language=Python, caption={Implementazione della funzione \texttt{format\_sci\_axis}.}]
+def format_sci_axis(
+    ax: plt.Axes,
+    vals: Sequence[float] | np.ndarray,
+    base_label: str,
+    axis: str = "y",
+    unit: str = "",
+    min_exp: int = 2,
+    dec: int = 2,
+) -> str:
+    arr = np.asarray(vals, dtype=float)
+    non_zero = arr[arr != 0]
+    amax = np.max(np.abs(non_zero)) if len(non_zero) > 0 else 0.0
+    esp = int(math.floor(math.log10(amax))) if amax > 0 else 0
+
+    u_clean = unit.strip().replace("$", "")
+    if u_clean.startswith(r"\mathrm{") and u_clean.endswith("}"):
+        u_clean = u_clean[len(r"\mathrm{"):-1]
+
+    unit_math = rf"\mathrm{{{u_clean}}}" if u_clean else ""
+
+    if abs(esp) >= min_exp:
+        scale = 10.0**esp
+        fmt = ticker.FuncFormatter(lambda v, _: f"{v / scale:.{dec}f}")
+        getattr(ax, f"{axis}axis").set_major_formatter(fmt)
+
+        if unit_math:
+            suffix = rf"\, [$\times 10^{{{esp}}}\ {unit_math}$]"
+        else:
+            suffix = rf"\, [$\times 10^{{{esp}}}$]"
+        return f"{base_label}{suffix}"
+
+    suffix = rf"\, [${unit_math}$]" if unit_math else ""
+    return f"{base_label}{suffix}"
+\end{lstlisting}
+
+\subsection{Dettaglio dei Parametri}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{l p{2.5cm} X}
+\toprule
+\textbf{Parametro} & \textbf{Tipo} & \textbf{Funzione e Comportamento} \\
+\midrule
+\texttt{ax} & \texttt{plt.Axes} & Asse Matplotlib su cui registrare il \texttt{FuncFormatter}. \\
+\texttt{vals} & \texttt{ArrayLike} & Serie di valori da cui stimare l'ordine di grandezza asintotico. \\
+\texttt{base\_label} & \texttt{str} & Nome fisico della variabile (es. \texttt{r"Frequenza di scansione"}). \\
+\texttt{axis} & \texttt{str} & Asse di applicazione: \texttt{'x'} oppure \texttt{'y'}. \\
+\texttt{unit} & \texttt{str} & Unità di misura SI (es. \texttt{"Hz"}, \texttt{"V"}). \\
+\texttt{min\_exp} & \texttt{int} & Soglia minima sull'esponente assoluto per attivare la riscalatura (default: 2). \\
+\texttt{dec} & \texttt{int} & Numero fisso di cifre decimali dopo la virgola (default: 2). \\
+\bottomrule
+\end{tabularx}
+\caption{Specifiche dei parametri di ingresso per \texttt{format\_sci\_axis}.}
+\end{table}
+
+\subsection{Regola di Chiamata Critica}
+\textbf{Attenzione}: In Matplotlib, l'applicazione di locator come \texttt{AutoMinorLocator} o \texttt{MaxNLocator} resetta il formattatore scalare di default. Di conseguenza, \texttt{format\_sci\_axis()} deve essere invocata \textbf{dopo} aver configurato le tacche e le griglie con \texttt{apply\_academic\_ticks\_and\_grid()}.
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Gestione di Assi, Tacche e Griglie: \texttt{apply\_academic\_ticks\_and\_grid}}
+% ──────────────────────────────────────────────────────────────────────────────
+
+La funzione \texttt{apply\_academic\_ticks\_and\_grid} standardizza la geometria fisica del frame di visualizzazione. Essa introduce tre aspetti cardine:
+\begin{enumerate}
+    \item \textbf{Tacche bidirezionali \texttt{inout}}: le tacche attraversano la linea dell'asse simmetricamente, metà all'interno e metà all'esterno, evitando sia di coprire i dati periferici sia di invadere le cifre numeriche.
+    \item \textbf{Disaccoppiamento Lineare/Logaritmico}: è possibile impostare l'asse $x$ e l'asse $y$ indipendentemente su scala lineare o logaritmica.
+    \item \textbf{Griglia bicanale a contrasto calibrato}: griglia principale tratteggiata (\texttt{"--"}, colore grigio \texttt{\#cccccc}) e griglia secondaria punteggiata fine (\texttt{":"}, colore \texttt{\#e5e5e5}).
+\end{enumerate}
+
+\begin{lstlisting}[language=Python, caption={Implementazione di \texttt{apply\_academic\_ticks\_and\_grid}.}]
+def apply_academic_ticks_and_grid(
+    ax: plt.Axes,
+    scale_x: str = "linear",  # "linear" oppure "log"
+    scale_y: str = "linear",  # "linear" oppure "log"
+    major_len: float = 8.0,
+    minor_len: float = 4.0,
+    major_width: float = 0.8,
+    minor_width: float = 0.5,
+) -> None:
+    ax.set_xscale(scale_x)
+    ax.set_yscale(scale_y)
+
+    if scale_x == "log":
+        ax.xaxis.set_major_locator(ticker.LogLocator(base=10.0, numticks=15))
+        ax.xaxis.set_minor_locator(ticker.LogLocator(base=10.0, subs=np.arange(2, 10) * 0.1, numticks=15))
+        ax.xaxis.set_major_formatter(ticker.LogFormatterMathtext())
+    else:
+        ax.xaxis.set_minor_locator(ticker.AutoMinorLocator())
+
+    if scale_y == "log":
+        ax.yaxis.set_major_locator(ticker.LogLocator(base=10.0, numticks=15))
+        ax.yaxis.set_minor_locator(ticker.LogLocator(base=10.0, subs=np.arange(2, 10) * 0.1, numticks=15))
+        ax.yaxis.set_major_formatter(ticker.LogFormatterMathtext())
+    else:
+        ax.yaxis.set_minor_locator(ticker.AutoMinorLocator())
+
+    ax.tick_params(
+        axis="both", which="major", direction="inout",
+        length=major_len, width=major_width, colors="black",
+        top=True, right=True, bottom=True, left=True,
+    )
+    ax.tick_params(
+        axis="both", which="minor", direction="inout",
+        length=minor_len, width=minor_width, colors="black",
+        top=True, right=True, bottom=True, left=True,
+    )
+
+    ax.grid(True, which="major", ls="--", lw=0.6, color="#cccccc", alpha=0.85)
+    ax.grid(True, which="minor", ls=":", lw=0.4, color="#e5e5e5", alpha=0.7)
+\end{lstlisting}
+
+\newpage
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Topologia dei Layout di Pubblicazione}
+% ──────────────────────────────────────────────────────────────────────────────
+
+\subsection{Grafico a Pannelli Accostati (Dati + Residui)}
+
+Nei report sperimentali, il grafico di regressione deve includere inferiormente il diagramma dei residui verticali o normalizzati ($r_i$ o $z_i$). 
+
+Per garantire che l'ascissa sia rigorosamente allineata e priva di fessure, si usa \texttt{gridspec.GridSpec} forzando lo spazio verticale a zero (\texttt{hspace=0.0}):
+
+\begin{lstlisting}[language=Python, caption={Costruzione del layout a due pannelli accostati.}]
+fig = plt.figure(figsize=(6.0, 5.2))
+gs = gridspec.GridSpec(2, 1, height_ratios=[3.2, 1.0])
+gs.update(hspace=0.0)
+
+ax_main = fig.add_subplot(gs[0, 0])
+ax_res  = fig.add_subplot(gs[1, 0], sharex=ax_main)
+
+# Nasconde le etichette dell'asse X sul pannello superiore
+ax_main.tick_params(axis="x", labelbottom=False)
+
+# Rimuove il tick 0.00 inferiore per evitare collisioni con la linea di giunzione
+ax_main.yaxis.set_major_locator(ticker.MaxNLocator(nbins=5, prune="lower"))
+
+# Impostazione simmetrica dei residui con zero centrato
+max_dev = np.max(np.abs(residui) + err_y)
+ax_res.set_ylim(-1.35 * max_dev, 1.35 * max_dev)
+ax_res.yaxis.set_major_locator(ticker.MaxNLocator(nbins=3, symmetric=True, prune="both"))
+\end{lstlisting}
+
+\subsection{Standard per Barre d'Errore e Legende}
+\begin{itemize}
+    \item \textbf{Barre d'errore pulite}: utilizzare \texttt{capsize=0} o \texttt{capsize=1.6}. L'assenza o il contenimento del trattino terminale riduce l'affollamento visivo in campioni ad alta densità di punti.
+    \item \textbf{Legenda a cornice opaca}:
+    \begin{lstlisting}[language=Python]
+ax.legend(
+    loc="upper right", frameon=True, fancybox=False,
+    facecolor="white", edgecolor="black", framealpha=1.0,
+    borderpad=0.4, handlelength=1.4
+)
+    \end{lstlisting}
+    Gli angoli retti (\texttt{fancybox=False}) e l'opacità piena (\texttt{framealpha=1.0}) impediscono alle curve sottostanti di disturbare il testo.
+\end{itemize}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Mappe 2D Profilate di Confidenza: \texttt{chi2\_map\_pipeline}}
+% ──────────────────────────────────────────────────────────────────────────────
+
+Il modulo \texttt{chi\_squared\_2d\_map.py} integra direttamente l'oggetto \texttt{RisultatiFit} prodotto da \texttt{FitPipeline}. L'obiettivo è mappare le superfici di livello del $\Delta\chi^2$ sul piano coordinato $(\theta_x, \theta_y)$ e affiancare sui bordi i profili marginali 1D calcolati tramite l'algoritmo MINOS.
+
+\subsection{Architettura del Canvas a Quattro Riquadri}
+
+Per ospitare contemporaneamente la mappa bidimensionale, i due profili 1D, lo spazio informativo e la colorbar senza sbilanciare le proporzioni, la griglia viene suddivisa con \texttt{gridspec.GridSpec}:
+
+\begin{figure}[htbp]
+\centering
+\small
+\begin{tabular}{|c|c|c|c|}
+\hline
+\textbf{Subplot Top} (\texttt{ax\_t}) & \textbf{Box Statistico} & Vuoto & Vuoto \\
+Profilo 1D parametro $x$ & $\operatorname{Cov}(\theta_x, \theta_y)$, $\rho$ & & \\
+(Altezza: 1.0, Larghezza: 3.5) & (Altezza: 1.0, Larghezza: 1.0) & & \\
+\hline
+\textbf{Mappa Centrale} (\texttt{ax1}) & \textbf{Subplot Destro} (\texttt{ax\_r}) & Pad & \textbf{Colorbar} (\texttt{cax}) \\
+$p(x, y)$ continuo $+$ Contorni & Profilo 1D parametro $y$ & $0.1$ & Spessore: $0.15$ \\
+(Altezza: 3.5, Larghezza: 3.5) & (Altezza: 3.5, Larghezza: 1.0) & & \\
+\hline
+\end{tabular}
+\caption{Topologia dei subplot generati da \texttt{chi2\_map\_pipeline} con \texttt{colorbar\_loc="right"}.}
+\end{figure}
+
+\subsection{Significato Geometrico dei Contorni e dei Livelli}
+
+La mappa traccia simultaneamente le regioni di confidenza 2D e i vincoli 1D:
+\begin{itemize}
+    \item \textbf{Contorni 2D congiunti} (linee bianche continue, tratteggiate e punteggiate):
+    \begin{equation}
+        \Delta\chi^2 = 2.30 \ (1\sigma_{2\text{D}}), \qquad \Delta\chi^2 = 6.18 \ (2\sigma_{2\text{D}}), \qquad \Delta\chi^2 = 11.83 \ (3\sigma_{2\text{D}})
+    \end{equation}
+    Queste curve delimitano la probabilità congiunta che entrambi i parametri cadano simultaneamente nella regione indicata ($68.27\%$, $95.45\%$ e $99.73\%$).
+    \item \textbf{Contorno 1D marginale} (linea nera tratto-punto):
+    \begin{equation}
+        \Delta\chi^2 = 1.00 \ (1\sigma_{1\text{D}})
+    \end{equation}
+    Le rette tangenti a questa curva ellittica coincidono esattamente con le linee verticali e orizzontali rosse proiettate dagli errori MINOS singoli dei profili marginali, confermando visivamente la consistenza dell'ottimizzazione.
+\end{itemize}
+
+\subsection{Effetto Contorno (\emph{Halo}) sulle Scritte}
+Sulle mappe a variazione continua di intensità cromatica (es. \texttt{viridis\_r}), il testo scuro rischia di perdersi sulle regioni scure, mentre il testo bianco diventa illeggibile sulle regioni chiare. Il problema viene risolto applicando un contorno tipografico dinamico (\emph{halo}):
+
+\begin{lstlisting}[language=Python, caption={Applicazione del path effect per il contrasto delle etichette di livello.}]
+halo = [patheffects.withStroke(linewidth=2.5, foreground="white")]
+clbl_2d = ax1.clabel(cs_2d, inline=True, fmt=fmt_clabel, colors="black")
+plt.setp(clbl_2d, path_effects=halo)
+\end{lstlisting}
+
+\newpage
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Guida Operativa: Esempi di Codice Pronti all'Uso}
+% ──────────────────────────────────────────────────────────────────────────────
+
+\subsection{Esempio 1: Fit RLC con Residui e Notazione Scientifica}
+
+\begin{lstlisting}[language=Python, caption={Script completo per il plottaggio di un picco di risonanza con residui.}]
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import matplotlib.ticker as ticker
+from plot_typo import setup_academic_style, format_sci_axis, apply_academic_ticks_and_grid
+
+setup_academic_style()
+
+# Modello teorico
+f0, A0, gamma = 105.7e3, 5.2e4, 4.5e3
+def risonanza(f):
+    return A0 / np.sqrt(1.0 + ((f**2 - f0**2) / (gamma * f))**2)
+
+f_dense = np.linspace(90e3, 122e3, 500)
+y_dense = risonanza(f_dense)
+
+rng = np.random.default_rng(42)
+f_data = np.linspace(92e3, 120e3, 25)
+err_y = np.full_like(f_data, 0.04 * A0)
+y_data = risonanza(f_data) + rng.normal(0, err_y)
+residui = y_data - risonanza(f_data)
+
+# Layout a due pannelli
+fig = plt.figure(figsize=(6.0, 5.2))
+gs = gridspec.GridSpec(2, 1, height_ratios=[3.2, 1.0])
+gs.update(hspace=0.0)
+
+ax_main = fig.add_subplot(gs[0, 0])
+ax_res  = fig.add_subplot(gs[1, 0], sharex=ax_main)
+
+# Pannello principale
+ax_main.errorbar(f_data, y_data, yerr=err_y, fmt="o", markersize=3.0,
+                 color="black", ecolor="black", elinewidth=0.8, capsize=0,
+                 label=r"Dati misurati", zorder=3)
+ax_main.plot(f_dense, y_dense, color="#1f77b4", lw=1.4, label=r"Fit teorico", zorder=2)
+ax_main.axvline(f0, color="red", ls=":", lw=1.1, label=r"$f_0 = 105.7\,\mathrm{kHz}$")
+
+# Pannello residui
+ax_res.errorbar(f_data, residui, yerr=err_y, fmt="o", markersize=3.0,
+                color="black", ecolor="black", elinewidth=0.8, capsize=0, zorder=3)
+ax_res.axhline(0.0, color="red", ls="--", lw=1.1)
+ax_res.axvline(f0, color="red", ls=":", lw=1.1)
+
+# Geometria e tacche
+apply_academic_ticks_and_grid(ax_main, scale_x="linear", scale_y="linear")
+apply_academic_ticks_and_grid(ax_res, scale_x="linear", scale_y="linear")
+ax_main.tick_params(axis="x", labelbottom=False)
+
+# Bilanciamento residui e soppressione zero critico
+ax_res.set_yticks([-5e3, 0.0, 5e3])
+ax_res.set_ylim(-7.5e3, 7.5e3)
+ax_main.yaxis.set_major_locator(ticker.MaxNLocator(nbins=5, prune="lower"))
+
+# Formattazione assi (chiamata per ULTIMA)
+ax_main.set_ylabel(format_sci_axis(ax_main, y_dense, r"Ampiezza", axis="y", unit="u.a."))
+ax_res.set_ylabel(format_sci_axis(ax_res, residui, r"Residui", axis="y", unit="u.a.", dec=1))
+ax_res.set_xlabel(format_sci_axis(ax_res, f_data, r"Frequenza di scansione", axis="x", unit="Hz"))
+
+ax_main.legend(loc="upper right", frameon=True, fancybox=False,
+               facecolor="white", edgecolor="black", framealpha=1.0)
+fig.tight_layout(pad=0.25)
+fig.savefig("esempio_fit_residui.pdf", dpi=300, bbox_inches="tight", pad_inches=0.08)
+\end{lstlisting}
+
+\newpage
+
+\subsection{Esempio 2: Diagramma di Bode Semilogaritmico con Residui in dB}
+
+\begin{lstlisting}[language=Python, caption={Script per grafico di Bode e residui con asse X logaritmico.}]
+f0, Q = 10.0e3, 3.0
+def modulo_db(f):
+    s = 1j * (f / f0)
+    H = 1.0 / (1.0 + (s / Q) + s**2)
+    return 20.0 * np.log10(np.abs(H))
+
+f_dense = np.logspace(3, 5, 500)
+mag_dense = modulo_db(f_dense)
+
+f_data = np.logspace(3.1, 4.9, 22)
+err_mag = np.full_like(f_data, 0.45)
+mag_data = modulo_db(f_data) + rng.normal(0, err_mag)
+residui = mag_data - modulo_db(f_data)
+
+fig = plt.figure(figsize=(6.0, 5.2))
+gs = gridspec.GridSpec(2, 1, height_ratios=[3.2, 1.0])
+gs.update(hspace=0.0)
+
+ax_main = fig.add_subplot(gs[0, 0])
+ax_res  = fig.add_subplot(gs[1, 0], sharex=ax_main)
+
+ax_main.plot(f_dense, mag_dense, color="#1f77b4", lw=1.4, label=r"Modello $|H(f)|$")
+ax_main.errorbar(f_data, mag_data, yerr=err_mag, fmt="o", markersize=3.0,
+                 color="black", ecolor="black", elinewidth=0.8, capsize=1.6, label=r"Dati misurati")
+ax_main.axvline(f0, color="red", ls=":", lw=1.1, label=r"$f_0 = 10\,\mathrm{kHz}$")
+
+ax_res.errorbar(f_data, residui, yerr=err_mag, fmt="o", markersize=3.0,
+                color="black", ecolor="black", elinewidth=0.8, capsize=1.6)
+ax_res.axhline(0.0, color="red", ls="--", lw=1.1)
+ax_res.axvline(f0, color="red", ls=":", lw=1.1)
+
+apply_academic_ticks_and_grid(ax_main, scale_x="log", scale_y="linear")
+apply_academic_ticks_and_grid(ax_res, scale_x="log", scale_y="linear")
+ax_main.tick_params(axis="x", labelbottom=False)
+
+max_dev = np.max(np.abs(residui) + err_mag)
+ax_res.set_ylim(-1.35 * max_dev, 1.35 * max_dev)
+ax_res.yaxis.set_major_locator(ticker.MaxNLocator(nbins=3, symmetric=True, prune="both"))
+
+ax_main.set_ylabel(r"Ampiezza $[\mathrm{dB}]$")
+ax_res.set_xlabel(r"Frequenza $[\mathrm{Hz}]$")
+ax_res.set_ylabel(r"Residui $[\mathrm{dB}]$")
+
+ax_main.legend(loc="lower left", frameon=True, fancybox=False,
+               facecolor="white", edgecolor="black", framealpha=1.0)
+fig.tight_layout(pad=0.25)
+fig.savefig("esempio_bode_residui.pdf", dpi=300, bbox_inches="tight", pad_inches=0.08)
+\end{lstlisting}
+
+\subsection{Esempio 3: Grafico a Doppia Scala Logaritmica (Log-Log)}
+
+\begin{lstlisting}[language=Python, caption={Script per grafico Log-Log di leggi di potenza.}]
+A_theo, alpha = 3.2e-4, -1.65
+def power_law(f): return A_theo * (f**alpha)
+
+f_dense = np.logspace(1, 4, 400)
+S_dense = power_law(f_dense)
+
+f_data = np.logspace(1.2, 3.8, 16)
+err_S = 0.12 * power_law(f_data)
+S_data = power_law(f_data) + rng.normal(0, err_S)
+
+fig, ax = plt.subplots(figsize=(5.8, 4.4))
+
+ax.plot(f_dense, S_dense, color="#2ca02c", lw=1.4, label=rf"Modello $S(f) \propto f^{{{alpha:.2f}}}$")
+ax.errorbar(f_data, S_data, yerr=err_S, fmt="o", markersize=3.2,
+            color="black", ecolor="black", elinewidth=0.8, capsize=1.8, label=r"Dati spettrali")
+
+apply_academic_ticks_and_grid(ax, scale_x="log", scale_y="log")
+
+ax.set_xlabel(r"Frequenza $[\mathrm{Hz}]$")
+ax.set_ylabel(r"Densit\`a spettrale $[\mathrm{V^2\,Hz^{-1}}]$")
+
+ax.legend(loc="upper right", frameon=True, fancybox=False,
+          facecolor="white", edgecolor="black", framealpha=1.0)
+fig.tight_layout(pad=0.3)
+fig.savefig("esempio_log_log.pdf", dpi=300, bbox_inches="tight", pad_inches=0.08)
+\end{lstlisting}
+
+\end{document}

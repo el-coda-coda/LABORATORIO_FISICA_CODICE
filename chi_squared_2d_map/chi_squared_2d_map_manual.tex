@@ -1,0 +1,379 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{amsmath,amssymb,amsfonts,mathtools}
+\usepackage{geometry}
+\geometry{top=2.5cm, bottom=2.5cm, left=2.3cm, right=2.3cm}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{bm}
+
+% Configurazione per il codice Python
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.97,0.97,0.97}
+
+\lstdefinestyle{pythonstyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{blue}\bfseries,
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=4,
+    frame=single
+}
+\lstset{style=pythonstyle}
+
+\title{\textbf{Architettura Computazionale e Visualizzazione delle Mappe di Confidenza $\Delta\chi^2$ 2D}\\\large Manuale Tecnico e Guida alle API del Modulo \texttt{chi\_squared\_2d\_map}}
+\author{Laboratorio di Fisica Sperimentale e Computazionale}
+\date{21 ottobre 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Questo manuale fornisce la documentazione tecnica e operativa del modulo \texttt{chi\_squared\_2d\_map.py}, progettato per l'esplorazione e la rappresentazione grafica rigorosa delle superfici di costo bidimensionali scaturite da processi di fit ai minimi quadrati generalizzati (ODR Metodo~A). Vengono analizzati in dettaglio: l'algoritmo di profilazione vincolata con scansione a serpentina e \emph{warm-start} sequenziale di \texttt{Minuit}, l'interpolazione spline cubica per la ricostruzione continua della varietà, la topologia della griglia asimmetrica a quattro sub-riquadri via \texttt{GridSpec}, l'isolamento del box statistico di covarianza nel quadrante orfano e l'integrazione con i profili marginali 1D calcolati dall'algoritmo MINOS.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Introduzione e Finalità del Modulo}
+% ──────────────────────────────────────────────────────────────────────────────
+
+Nelle analisi di fisica sperimentale, l'esame della sola matrice di covarianza $V = 2\mathbf{H}^{-1}$ (calcolata localmente nel minimo con \texttt{hesse}) fornisce una descrizione parabolica locale che ignora le asimmetrie e le correlazioni non lineari dello spazio dei parametri. Per visualizzare la reale geometria dell'incertezza congiunta di due parametri $(\theta_x, \theta_y)$, il modulo \texttt{chi\_squared\_2d\_map.py} implementa:
+\begin{enumerate}
+    \item \textbf{Scansione Profilata Reale (Profile Likelihood Scan)}: a ogni nodo della griglia $2\mathrm{D}$ i parametri $\theta_x$ e $\theta_y$ vengono fissati, mentre tutti i restanti $p-2$ parametri liberi del modello vengono rilassati e ri-ottimizzati tramite \texttt{migrad()}.
+    \item \textbf{Sincronizzazione Geometrica 1D--2D}: proiezione sui bordi dei profili unidimensionali MINOS calcolati da \texttt{mnprofile}, verificando visivamente che le rette tangenti al contorno $1\sigma_{1\mathrm{D}}$ ($\Delta\chi^2 = 1.0$) coincidano con gli errori asimmetrici marginali.
+    \item \textbf{Gestione Integrata dello Spazio Morto}: allocazione del box statistico con $\operatorname{Cov}(\theta_x, \theta_y)$ e $\rho_{xy}$ nel quadrante in alto a destra, eliminando interferenze con i dati.
+    \item \textbf{Respiro Laterale della Colorbar}: posizionamento di un canale dedicato a destra con cuscinetto (\emph{buffer pad}), separando la barra di calibrazione continua dal profilo marginale verticale.
+\end{enumerate}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Algoritmo di Profilazione e Ricostruzione della Superficie}
+% ──────────────────────────────────────────────────────────────────────────────
+
+\subsection{Campionamento a Serpentina e Warm-Start Sequenziale}
+
+Dato un modello a $p$ parametri con minimo globale $F_{\mathrm{min}} = \chi^2(\hat{\boldsymbol{\theta}})$, si definisce un dominio di interesse bidimensionale centrato su $(\hat{\theta}_x, \hat{\theta}_y)$ di semi-ampiezza $N_\sigma$:
+\begin{equation}
+    x \in [\hat{\theta}_x - N_\sigma \sigma_x, \; \hat{\theta}_x + N_\sigma \sigma_x], \qquad y \in [\hat{\theta}_y - N_\sigma \sigma_y, \; \hat{\theta}_y + N_\sigma \sigma_y]
+\end{equation}
+dove $\sigma_x$ e $\sigma_y$ rappresentano le incertezze massime (o MINOS asimmetriche estese) estratte dall'oggetto \texttt{iminuit.Minuit}.
+
+Il dominio viene discretizzato in una griglia regolare $K \times K$ (tipicamente $K \in [30, 45]$). La minimizzazione ripetuta a ogni nodo richiede una gestione accurata del punto iniziale per prevenire salti su minimi locali o fallimenti dell'algoritmo di discesa. Il modulo adotta una traiettoria a \textbf{serpentina alternata} (\emph{boustrophedon}):
+
+\begin{lstlisting}[language=Python, caption={Scansione a serpentina con warm-start e fallback di ripristino.}]
+for i in range(grid_size):
+    # Alterna la direzione di scansione per massimizzare la vicinanza metrica
+    j_indices = range(grid_size) if (i % 2 == 0) else reversed(range(grid_size))
+    for j in j_indices:
+        # 1. Warm-start: inizializza i p-2 parametri dallo stato ottimo del vicino
+        for p in param_names:
+            m.values[p] = current_cache[p]
+
+        # 2. Fissazione della coppia bidimensionale
+        m.fixed[param_x] = True
+        m.fixed[param_y] = True
+        m.values[param_x] = X_map[i, j]
+        m.values[param_y] = Y_map[i, j]
+        m.migrad()
+
+        # 3. Fallback di sicurezza se la discesa diverge o non e' valida
+        if not m.valid:
+            for idx, p in enumerate(param_names):
+                m.values[p] = orig_values[idx]
+            m.values[param_x] = X_map[i, j]
+            m.values[param_y] = Y_map[i, j]
+            m.migrad()
+
+        Z_profiled[i, j] = m.fval
+        for p in param_names:
+            current_cache[p] = m.values[p]
+\end{lstlisting}
+
+Il \emph{warm-start} riduce di oltre il $70\%$ le iterazioni interne di \texttt{migrad}, poiché il vettore dei parametri ottimi a coordinate $(i, j)$ costituisce un'eccellente approssimazione di partenza per il nodo adiacente $(i, j \pm 1)$.
+
+\subsection{Regolarizzazione e Interpolazione Spline 2D}
+
+La matrice campionata discretamente $Z_{ij} = \chi^2(x_i, y_j)$ viene riferita al minimo assoluto:
+\begin{equation}
+    \Delta Z_{ij} = Z_{ij} - F_{\mathrm{min}}
+\end{equation}
+Per tracciare curve di livello continue ed evitare seghettature poligonali nei contorni chiusi, la matrice $\Delta Z$ viene sovracampionata mediante interpolazione spline cubica (\texttt{scipy.ndimage.zoom}) con fattore di moltiplicazione $Z_f$ (default: 4):
+\begin{lstlisting}[language=Python]
+dz_smooth = ndimage.zoom(dz, zoom_factor, order=3)
+\end{lstlisting}
+La matrice continua risultante possiede dimensione $(K \cdot Z_f) \times (K \cdot Z_f)$, garantendo contorni ellittici fluidi e privi di artefatti numerici di discretizzazione.
+
+\newpage
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Topologia del Canvas e Geometria dei Subplot}
+% ──────────────────────────────────────────────────────────────────────────────
+
+\subsection{Partizione Asimmetrica con \texttt{gridspec.GridSpec}}
+
+La disposizione simultanea della mappa 2D, dei due profili 1D e della barra colori richiede una suddivisione rigorosa dello spazio priva di automatismi coprenti. Con l'opzione standard \texttt{colorbar\_loc="right"}, la figura viene ripartita in una griglia di $2 \text{ righe} \times 4 \text{ colonne}$:
+
+\begin{lstlisting}[language=Python, caption={Definizione della griglia proporzionale con colorbar a destra.}]
+fig = plt.figure(figsize=(8.2, 7.2))
+gs = gridspec.GridSpec(
+    2, 4, 
+    width_ratios=[3.5, 1.0, 0.1, 0.15], 
+    height_ratios=[1.0, 3.5]
+)
+gs.update(wspace=spacing, hspace=spacing)
+
+ax1  = fig.add_subplot(gs[1, 0])                 # Mappa principale 2D
+ax_t = fig.add_subplot(gs[0, 0], sharex=ax1)     # Profilo 1D superiore
+ax_r = fig.add_subplot(gs[1, 1], sharey=ax1)     # Profilo 1D laterale destro
+cax  = fig.add_subplot(gs[1, 3])                 # Canale Colorbar dedicato
+\end{lstlisting}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{l c c X}
+\toprule
+\textbf{Subplot / Slot} & \textbf{Righe / Colonne} & \textbf{Ratio $(H \times W)$} & \textbf{Contenuto e Vincoli Fisici} \\
+\midrule
+\texttt{ax\_t} & $[0, 0]$ & $1.0 \times 3.5$ & Profilo $\Delta\chi^2$ parametro $x$; asse $x$ condiviso con \texttt{ax1}. \\
+\emph{Quadrante Orfano} & $[0, 1]$ & $1.0 \times 1.0$ & Riquadro statistico: $\operatorname{Cov}(\theta_x, \theta_y)$, $\rho_{xy}$, errori asimmetrici. \\
+\emph{Buffer Pad} & $[0, 2]$ e $[1, 2]$ & $1.0 \times 0.1$ & Intervallo vuoto di distacco per isolare la colorbar. \\
+\texttt{ax1} & $[1, 0]$ & $3.5 \times 3.5$ & Mappa di densità $\Delta\chi^2$, livelli di contorno e punto ottimo $(+)$. \\
+\texttt{ax\_r} & $[1, 1]$ & $3.5 \times 1.0$ & Profilo $\Delta\chi^2$ parametro $y$; asse $y$ condiviso con \texttt{ax1}. \\
+\texttt{cax} & $[1, 3]$ & $3.5 \times 0.15$ & Scala cromatica graduata continua con tacche sui livelli $\sigma_{2\mathrm{D}}$. \\
+\bottomrule
+\end{tabularx}
+\caption{Mappatura delle celle della griglia \texttt{GridSpec} in configurazione laterale.}
+\end{table}
+
+\subsection{Sincronizzazione degli Assi e Soppressione Sovrapposizioni}
+La coerenza visiva esige l'azzeramento dello spazio tra la mappa e i profili (\texttt{wspace=0.01}, \texttt{hspace=0.01}):
+\begin{itemize}
+    \item L'asse orizzontale di \texttt{ax\_t} condivide i limiti con \texttt{ax1} (\texttt{sharex=ax1}), ma le etichette numeriche inferiori vengono soppresse:
+    \begin{lstlisting}[language=Python]
+ax_t.tick_params(axis='x', bottom=True, labelbottom=False)
+    \end{lstlisting}
+    \item L'asse verticale di \texttt{ax\_r} condivide i limiti con \texttt{ax1} (\texttt{sharey=ax1}), sopprimendo le etichette numeriche a sinistra:
+    \begin{lstlisting}[language=Python]
+ax_r.tick_params(axis='y', left=True, labelleft=False)
+    \end{lstlisting}
+    \item \textbf{Soppressione del Tick Zero Sovrapposto}: per evitare che la cifra \texttt{0} sull'asse $\Delta\chi^2$ di \texttt{ax\_r} si sovrapponga visivamente all'ultimo tick numerico dell'asse $x$ di \texttt{ax1}, è possibile applicare un formattatore di potatura:
+    \begin{lstlisting}[language=Python]
+ax_r.xaxis.set_major_formatter(
+    ticker.FuncFormatter(lambda v, _: "" if abs(v) < 1e-3 else f"{v:.0f}")
+)
+    \end{lstlisting}
+\end{itemize}
+
+\newpage
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Livelli di Confidenza, Contorni e Segnaletica}
+% ──────────────────────────────────────────────────────────────────────────────
+
+\subsection{Significato Statistico dei Valori $\Delta\chi^2$}
+
+Nella rappresentazione congiunta di due parametri, la variabile $\Delta\chi^2(\theta_x, \theta_y)$ segue asintoticamente una distribuzione chi-quadro a $\nu = 2$ gradi di libertà:
+\begin{equation}
+    P(\Delta\chi^2 \le \Delta\chi^2_0) = \int_0^{\Delta\chi^2_0} \frac{1}{2} e^{-z/2}\,dz = 1 - e^{-\Delta\chi^2_0 / 2}
+\end{equation}
+Al contrario, per un profilo marginale monodimensionale (proiettato su un singolo asse rilassando l'altro), i gradi di libertà sono $\nu = 1$:
+\begin{equation}
+    P(\Delta\chi^2 \le \Delta\chi^2_0) = \operatorname{erf}\left(\sqrt{\frac{\Delta\chi^2_0}{2}}\right)
+\end{equation}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{l c c c X}
+\toprule
+\textbf{Livello Tracciato} & \textbf{Gradi di Libertà} & $\Delta\chi^2$ & \textbf{Copertura} & \textbf{Stile Grafico Adottato} \\
+\midrule
+$1\sigma_{\text{1D}}$ (Marginale) & $\nu = 1$ & $1.00$ & $68.27\%$ & Tratto-punto nero (\texttt{'-.'}, spessore 1.1 pt) \\
+$1\sigma_{\text{2D}}$ (Congiunto) & $\nu = 2$ & $2.30$ & $68.27\%$ & Continuo bianco (\texttt{'-'}, spessore 1.6 pt) \\
+$2\sigma_{\text{2D}}$ (Congiunto) & $\nu = 2$ & $6.18$ & $95.45\%$ & Tratteggiato bianco (\texttt{'--'}, spessore 1.2 pt) \\
+$3\sigma_{\text{2D}}$ (Congiunto) & $\nu = 2$ & $11.83$ & $99.73\%$ & Punteggiato bianco (\texttt{':'}, spessore 0.9 pt) \\
+\bottomrule
+\end{tabularx}
+\caption{Livelli di confidenza standard e stili geometrici implementati nel modulo.}
+\end{table}
+
+\subsection{Verifica Geometrica delle Tangenti MINOS}
+
+Sul piano $2\mathrm{D}$, il contorno ad anello $1\sigma_{\text{1D}}$ ($\Delta\chi^2 = 1.00$) non racchiude il $68.27\%$ della probabilità congiunta (che richiederebbe $\Delta\chi^2 = 2.30$), bensì possiede una proprietà geometrica fondamentale:
+\begin{quote}
+\emph{Le rette tangenti orizzontali e verticali al contorno $\Delta\chi^2 = 1.00$ individuano esattamente gli intervalli di incertezza marginale a $1\sigma$ calcolati dal solutore MINOS per i singoli parametri.}
+\end{quote}
+Il modulo traccia tali tangenti mediante linee rosse tratteggiate (\texttt{ls='--', lw=1.2}), che si prolungano simultaneamente sia nella mappa centrale sia nei subplot 1D marginali, evidenziando visivamente la concordanza tra la scansione $2\mathrm{D}$ e i profili parabolici/asimmetrici $1\mathrm{D}$.
+
+\subsection{Leggibilità del Testo con Effetto Contorno (\emph{Halo Stroke})}
+
+Per garantire che le etichette numeriche dei livelli di contorno (es. $1\sigma_{\text{2D}}, 2\sigma_{\text{2D}}$) rimangano perfettamente visibili sia su sfondi scuri che su regioni a saturazione luminosa (come accade con le mappe \texttt{viridis\_r} o \texttt{plasma}), il testo viene corredato da un effetto contorno (\emph{path stroke}):
+
+\begin{lstlisting}[language=Python, caption={Applicazione del filtro tipografico halo con \texttt{patheffects}.}]
+halo = [patheffects.withStroke(linewidth=2.5, foreground="white")]
+clbl_2d = ax1.clabel(cs_2d, inline=True, fmt=fmt_clabel, colors="black")
+plt.setp(clbl_2d, path_effects=halo)
+
+clbl_1d = ax1.clabel(cs_1d, inline=True, fmt=fmt_clabel, colors="black")
+plt.setp(clbl_1d, path_effects=halo)
+\end{lstlisting}
+
+\newpage
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Firma Completa delle API: \texttt{chi2\_map\_pipeline}}
+% ──────────────────────────────────────────────────────────────────────────────
+
+\begin{lstlisting}[language=Python, caption={Firma della funzione principale \texttt{chi2\_map\_pipeline}.}]
+def chi2_map_pipeline(
+    risultati: Any,
+    param_x: str,
+    param_y: str,
+    param_info: Optional[Dict[str, Dict[str, str]]] = None,
+    n_sigma: float = 3.5,
+    grid_size: int = 35,
+    zoom_factor: int = 4,
+    show_clabels: bool = True,
+    manual_clabels: Union[bool, List[Tuple[float, float]]] = False,
+    clabel_fontsize: float = typo_params["legendsize"],
+    stats_box_loc: str = "inside_map",  # 'inside_map', 'top', o 'custom'
+    stats_box_pos: Optional[Tuple[float, float]] = None,
+    show_stats_box: bool = True,
+    spacing: float = 0.01,
+    cmap: str = "viridis_r",
+    save_path: Optional[str] = None,
+    show: bool = True,
+    colorbar_loc: str = "right",        # 'right', 'bottom', oppure 'none'
+) -> Tuple[plt.Figure, Tuple[plt.Axes, plt.Axes, plt.Axes]]:
+\end{lstlisting}
+
+\subsection{Dizionario dei Parametri di Configurazione}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{l p{2.8cm} X}
+\toprule
+\textbf{Parametro} & \textbf{Tipo / Default} & \textbf{Descrizione e Funzione Operativa} \\
+\midrule
+\texttt{risultati} & \texttt{RisultatiFit} & Contenitore dell'output del fit contenente l'istanza \texttt{minuit\_obj}. \\
+\texttt{param\_x}, \texttt{param\_y} & \texttt{str} & Nomi delle due variabili fisiche da scansionare (es. \texttt{"m"}, \texttt{"q"}). \\
+\texttt{param\_info} & \texttt{dict} / \texttt{None} & Metadati di visualizzazione: simbolo \LaTeX\ (\texttt{'label'}) e unità di misura (\texttt{'unit'}). \\
+\texttt{n\_sigma} & \texttt{float = 3.5} & Semi-estensione dell'intervallo di scansione espressa in deviazioni standard. \\
+\texttt{grid\_size} & \texttt{int = 35} & Risoluzione della griglia nodale $K \times K$ prima della regolarizzazione. \\
+\texttt{zoom\_factor} & \texttt{int = 4} & Fattore di interpolazione spline cubica ($K \cdot Z_f$ punti finali). \\
+\texttt{show\_clabels} & \texttt{bool = True} & Abilita la scrittura a video delle etichette dei contorni ($1\sigma_{\text{2D}}$, ecc.). \\
+\texttt{manual\_clabels} & \texttt{bool / list} & Coordinate manuali delle etichette per evitare sovrapposizioni su curve ripide. \\
+\texttt{stats\_box\_loc} & \texttt{str = "inside\_map"} & Posizione del box di correlazione: \texttt{'inside\_map'}, \texttt{'top'}, \texttt{'custom'}. \\
+\texttt{stats\_box\_pos} & \texttt{tuple} / \texttt{None} & Coordinate $(x, y)$ in frazione di figura per la modalità \texttt{'custom'}. \\
+\texttt{colorbar\_loc} & \texttt{str = "right"} & Posizione della scala colori: \texttt{'right'}, \texttt{'bottom'} o disabilitata. \\
+\texttt{spacing} & \texttt{float = 0.01} & Separazione orizzontale e verticale tra i riquadri (\texttt{wspace, hspace}). \\
+\texttt{cmap} & \texttt{str = "viridis\_r"} & Mappa cromatica continua di Matplotlib per i valori del $\Delta\chi^2$. \\
+\texttt{save\_path} & \texttt{str / Path / None} & Percorso su disco per l'esportazione automatica in formato vettoriale PDF/SVG. \\
+\bottomrule
+\end{tabularx}
+\caption{Parametri di configurazione del generatore di mappe profilate.}
+\end{table}
+
+\newpage
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Integrazione con la Pipeline di Fit ed Esempio Completo}
+% ──────────────────────────────────────────────────────────────────────────────
+
+Lo script seguente illustra il ciclo completo di laboratorio: generazione dati con errori bivariati, stima non distorta con \texttt{FitPipeline} (ODR Metodo~A) e produzione della mappa con box statistico nel quadrante in alto a destra (\texttt{stats\_box\_loc="custom"}).
+
+\begin{lstlisting}[language=Python, caption={Flusso end-to-end: regressione ortogonale e rendering della mappa 2D.}]
+import numpy as np
+from pathlib import Path
+from chi_squared_fit import FitPipeline
+from chi_squared_2d_map import chi2_map_pipeline
+
+# 1. Definizione della funzione teorica (Legge di Ohm con offset)
+def modello_lineare(x, m, q):
+    return m * x + q
+
+# 2. Generazione del campione sintetico con errori su entrambe le variabili
+rng = np.random.default_rng(123)
+m_vero, q_vero = 2.45, 1.10
+n_punti = 35
+
+x_pulito = np.linspace(1.0, 10.0, n_punti)
+y_pulito = modello_lineare(x_pulito, m_vero, q_vero)
+
+err_x = np.full(n_punti, 0.20)
+err_y = np.full(n_punti, 0.45)
+
+x_misurato = x_pulito + rng.normal(0, err_x, n_punti)
+y_misurato = y_pulito + rng.normal(0, err_y, n_punti)
+
+# 3. Esecuzione FitPipeline con Metodo A (Varianza Congelata e MINOS)
+pipeline = FitPipeline(
+    model=modello_lineare,
+    param_names=["m", "q"],
+    p0=[1.0, 0.0],
+    run_minos=True,
+    verbose=True,
+)
+
+risultati_fit = pipeline.fit(
+    x=x_misurato,
+    y=y_misurato,
+    err_x=err_x,
+    err_y=err_y,
+    odr_lin_Newton=True,  # Attiva il Metodo A non distorto
+)
+
+# 4. Configurazione dei metadati dimensionali
+info_parametri = {
+    "m": {"label": r"$m$", "unit": r"\mathrm{V/s}"},
+    "q": {"label": r"$q$", "unit": r"\mathrm{V}"},
+}
+
+# 5. Generazione della Mappa 2D ad alta risoluzione
+save_folder = Path("examples")
+save_folder.mkdir(parents=True, exist_ok=True)
+
+fig, (ax_main, ax_top, ax_right) = chi2_map_pipeline(
+    risultati=risultati_fit,
+    param_x="m",
+    param_y="q",
+    param_info=info_parametri,
+    n_sigma=3.2,
+    grid_size=32,
+    zoom_factor=4,
+    stats_box_loc="custom",
+    stats_box_pos=(0.725, 0.85),  # Quadrante in alto a destra
+    show_clabels=True,
+    manual_clabels=False,
+    colorbar_loc="right",
+    cmap="viridis_r",
+    spacing=0.0,
+    save_path=save_folder / "mappa_chi2_profilata.pdf",
+    show=True,
+)
+\end{lstlisting}
+
+\end{document}
