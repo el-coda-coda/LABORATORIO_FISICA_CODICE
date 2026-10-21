@@ -92,8 +92,8 @@ def chi2_map_pipeline(
 
     def _extract_err(param_name: str) -> float:
         if param_name in m.merrors:
-            me = m.merrors[param_name]
-            return max(abs(me.lower), abs(me.upper))
+                me = m.merrors[param_name]
+                return max(abs(me.lower), abs(me.upper))
         return m.errors[param_name]
 
     err_x = _extract_err(param_x)
